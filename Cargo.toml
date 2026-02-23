@@ -1,0 +1,30 @@
+[package]
+name = "omega-trader"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/omgagi/omega-trader"
+description = "Broker-agnostic quantitative trading engine — Kalman filter, HMM regime detection, Kelly sizing, IBKR execution"
+
+[[bin]]
+name = "omega-trader"
+path = "src/bin/omega_trader/main.rs"
+
+[features]
+default = ["ibkr"]
+ibkr = ["dep:ibapi"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+async-trait = "0.1"
+
+ibapi = { version = "2.7", optional = true }
+rand = "0.8"
+futures = "0.3"
