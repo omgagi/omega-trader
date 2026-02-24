@@ -31,6 +31,10 @@ pub struct HiddenMarkovModel {
     regime_duration: u64,
     /// Previous regime for duration tracking.
     prev_regime: Option<Regime>,
+    /// EWMA variance of returns for adaptive discretization.
+    ewma_return_var: f64,
+    /// Number of returns processed.
+    return_count: u64,
 }
 
 #[allow(clippy::needless_range_loop)]
@@ -58,6 +62,8 @@ impl HiddenMarkovModel {
             belief: [1.0 / 3.0; NUM_STATES],
             regime_duration: 0,
             prev_regime: None,
+            ewma_return_var: 1e-8,
+            return_count: 0,
         }
     }
 
@@ -121,6 +127,33 @@ impl HiddenMarkovModel {
         }
 
         (regime, new_belief)
+    }
+
+    /// Update with a raw percentage return using adaptive discretization.
+    ///
+    /// Uses exponentially-weighted rolling σ to set thresholds, so the HMM
+    /// works correctly at any timescale (5s ticks, 1min bars, daily).
+    pub fn update_return(&mut self, pct_return: f64) -> (Regime, [f64; NUM_STATES]) {
+        // Update rolling variance (EWMA, λ=0.97)
+        self.ewma_return_var = 0.97 * self.ewma_return_var + 0.03 * pct_return * pct_return;
+        self.return_count += 1;
+
+        let sigma = self.ewma_return_var.sqrt().max(1e-10);
+
+        // Adaptive thresholds based on rolling σ
+        let obs = if pct_return < -2.0 * sigma {
+            Observation::BigDown
+        } else if pct_return < -0.5 * sigma {
+            Observation::SmallDown
+        } else if pct_return <= 0.5 * sigma {
+            Observation::Flat
+        } else if pct_return <= 2.0 * sigma {
+            Observation::SmallUp
+        } else {
+            Observation::BigUp
+        };
+
+        self.update(obs)
     }
 
     /// Train the model on a sequence of returns using Baum-Welch.
@@ -370,6 +403,37 @@ mod tests {
         assert!(
             (sum - 1.0).abs() < 1e-6,
             "Probabilities should sum to 1, got {sum}"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_discretization_detects_bull() {
+        let mut hmm = HiddenMarkovModel::crypto_default();
+
+        // Simulate small but consistently positive returns (like 5s ticks)
+        for _ in 0..30 {
+            hmm.update_return(0.0001); // +0.01% per tick
+        }
+
+        let probs = hmm.probabilities();
+        assert!(
+            probs[0] > probs[1] && probs[0] > probs[2],
+            "Bull should dominate with consistent positive returns: {probs:?}"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_discretization_detects_bear() {
+        let mut hmm = HiddenMarkovModel::crypto_default();
+
+        for _ in 0..30 {
+            hmm.update_return(-0.0001); // -0.01% per tick
+        }
+
+        let probs = hmm.probabilities();
+        assert!(
+            probs[1] > probs[0] && probs[1] > probs[2],
+            "Bear should dominate with consistent negative returns: {probs:?}"
         );
     }
 }

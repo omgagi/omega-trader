@@ -34,10 +34,13 @@ const VOL_LATERAL: f64 = 0.35;
 
 /// Regime-specific win rates for Kelly calculation.
 const WIN_RATE_BULL: f64 = 0.58;
-const WIN_RATE_BEAR: f64 = 0.42;
+const WIN_RATE_BEAR: f64 = 0.48;
 /// Lateral uses a slight mean-reversion edge — range-bound markets
 /// allow buying low / selling high within the range.
 const WIN_RATE_LATERAL: f64 = 0.52;
+
+/// Minimum bars before the engine produces trade signals.
+const WARMUP_BARS: u64 = 20;
 
 /// Main orchestrator combining all quant modules.
 pub struct QuantEngine {
@@ -115,9 +118,8 @@ impl QuantEngine {
             + (1.0 - lambda) * pct_return * pct_return)
             .sqrt();
 
-        // --- HMM regime detection ---
-        let obs = hmm::HiddenMarkovModel::discretize_return(pct_return);
-        let (regime, probs) = self.hmm.update(obs);
+        // --- HMM regime detection (adaptive discretization) ---
+        let (regime, probs) = self.hmm.update_return(pct_return);
         let regime_confidence = match regime {
             Regime::Bull => probs[0],
             Regime::Bear => probs[1],
@@ -141,7 +143,7 @@ impl QuantEngine {
         // --- Kelly sizing ---
         let (win_rate, win_loss_ratio) = match regime {
             Regime::Bull => (WIN_RATE_BULL, 1.8),
-            Regime::Bear => (WIN_RATE_BEAR, 1.2),
+            Regime::Bear => (WIN_RATE_BEAR, 1.5),
             Regime::Lateral => (WIN_RATE_LATERAL, 1.2),
         };
         let kelly_output = self.kelly.calculate(
@@ -152,7 +154,17 @@ impl QuantEngine {
         );
 
         // --- Direction & Action ---
-        let direction = if merton_allocation > 0.1 {
+        let direction = if matches!(regime, Regime::Lateral) {
+            // Merton is uninformative in Lateral (drift ≈ risk-free).
+            // Use Kalman trend as micro-direction for mean-reversion.
+            if trend > 0.0 {
+                Direction::Long
+            } else if trend < 0.0 {
+                Direction::Short
+            } else {
+                Direction::Hold
+            }
+        } else if merton_allocation > 0.1 {
             Direction::Long
         } else if merton_allocation < -0.1 {
             Direction::Short
@@ -160,26 +172,30 @@ impl QuantEngine {
             Direction::Hold
         };
 
-        let action = match (&regime, &direction) {
-            (Regime::Bull, Direction::Long) if kelly_output.should_trade => Action::Long {
-                urgency: regime_confidence,
-            },
-            (Regime::Bear, Direction::Short) if kelly_output.should_trade => Action::Short {
-                urgency: regime_confidence,
-            },
-            // Lateral regime: allow mean-reversion trades when Merton shows
-            // clear direction, but with reduced urgency (0.7×).
-            (Regime::Lateral, Direction::Long) if kelly_output.should_trade => Action::Long {
-                urgency: regime_confidence * 0.7,
-            },
-            (Regime::Lateral, Direction::Short) if kelly_output.should_trade => Action::Short {
-                urgency: regime_confidence * 0.7,
-            },
-            (Regime::Bear, _) if merton_allocation < -0.2 => Action::ReducePosition {
-                by_percent: (merton_allocation.abs() * 50.0).min(100.0),
-            },
-            _ if !kelly_output.should_trade => Action::Hold,
-            _ => Action::Hold,
+        let warmed_up = self.tick_count >= WARMUP_BARS;
+
+        let action = if !warmed_up {
+            Action::Hold
+        } else {
+            match (&regime, &direction) {
+                (Regime::Bull, Direction::Long) if kelly_output.should_trade => Action::Long {
+                    urgency: regime_confidence,
+                },
+                (Regime::Bear, Direction::Short) if kelly_output.should_trade => Action::Short {
+                    urgency: regime_confidence,
+                },
+                // Lateral regime: mean-reversion trades using Kalman trend direction.
+                (Regime::Lateral, Direction::Long) if kelly_output.should_trade => Action::Long {
+                    urgency: regime_confidence * 0.7,
+                },
+                (Regime::Lateral, Direction::Short) if kelly_output.should_trade => Action::Short {
+                    urgency: regime_confidence * 0.7,
+                },
+                (Regime::Bear, _) if merton_allocation < -0.2 => Action::ReducePosition {
+                    by_percent: (merton_allocation.abs() * 50.0).min(100.0),
+                },
+                _ => Action::Hold,
+            }
         };
 
         // --- Execution strategy ---
@@ -201,7 +217,9 @@ impl QuantEngine {
         };
 
         // --- Confidence ---
-        let confidence = regime_confidence * kelly_output.full_kelly.abs().min(1.0);
+        // Confidence = regime probability of the dominant state.
+        // During warmup, suppress to 0 so the skill won't trade.
+        let confidence = if warmed_up { regime_confidence } else { 0.0 };
 
         // --- Reasoning ---
         let regime_emoji = match regime {
@@ -427,6 +445,68 @@ mod tests {
                 Action::Hold => {} // Also valid — depends on Merton direction
                 _ => {}
             }
+        }
+    }
+
+    #[test]
+    fn test_engine_produces_long_on_clear_uptrend() {
+        let mut engine = QuantEngine::new("AAPL", 100_000.0);
+
+        let mut has_trade = false;
+        let mut price = 150.0;
+        for _ in 0..50 {
+            price *= 1.005; // +0.5% per bar
+            let signal = engine.process_price(price);
+            if matches!(signal.action, Action::Long { .. }) {
+                has_trade = true;
+            }
+        }
+
+        assert!(
+            has_trade,
+            "Engine should produce Long signal on clear uptrend after warmup"
+        );
+    }
+
+    #[test]
+    fn test_engine_produces_short_on_clear_downtrend() {
+        let mut engine = QuantEngine::new("AAPL", 100_000.0);
+
+        let mut has_short = false;
+        let mut price = 150.0;
+        for _ in 0..50 {
+            price *= 0.995; // -0.5% per bar
+            let signal = engine.process_price(price);
+            if matches!(signal.action, Action::Short { .. }) {
+                has_short = true;
+            }
+        }
+
+        assert!(
+            has_short,
+            "Engine should produce Short signal on clear downtrend after warmup"
+        );
+    }
+
+    #[test]
+    fn test_warmup_suppresses_signals() {
+        let mut engine = QuantEngine::new("AAPL", 100_000.0);
+
+        // During warmup (first 19 bars), action should always be Hold
+        // (tick_count goes 1..19, all < WARMUP_BARS=20)
+        let mut price = 150.0;
+        for i in 0..19 {
+            price *= 1.01; // Strong uptrend
+            let signal = engine.process_price(price);
+            assert!(
+                matches!(signal.action, Action::Hold),
+                "Bar {i}: action should be Hold during warmup, got {}",
+                signal.action
+            );
+            assert_eq!(
+                signal.confidence, 0.0,
+                "Bar {i}: confidence should be 0 during warmup"
+            );
         }
     }
 

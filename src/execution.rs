@@ -170,7 +170,14 @@ mod tests {
     #[test]
     fn test_small_order_immediate() {
         // 0.001 BTC at $50k with daily volume 1000 BTC = 0.0001% of volume
-        let plan = plan_execution("BTCUSDT", Side::Buy, 0.001, 50_000.0, 1000.0, AssetClass::Crypto);
+        let plan = plan_execution(
+            "BTCUSDT",
+            Side::Buy,
+            0.001,
+            50_000.0,
+            1000.0,
+            AssetClass::Crypto,
+        );
         assert!(
             matches!(plan, ExecutionPlan::Immediate(_)),
             "Small order should be Immediate"
@@ -180,7 +187,14 @@ mod tests {
     #[test]
     fn test_medium_order_twap() {
         // 2 BTC at $50k with daily volume 1000 BTC = 0.2% of volume
-        let plan = plan_execution("BTCUSDT", Side::Buy, 2.0, 50_000.0, 1000.0, AssetClass::Crypto);
+        let plan = plan_execution(
+            "BTCUSDT",
+            Side::Buy,
+            2.0,
+            50_000.0,
+            1000.0,
+            AssetClass::Crypto,
+        );
         assert!(
             matches!(plan, ExecutionPlan::Twap(_)),
             "Medium order should be TWAP"
@@ -190,7 +204,14 @@ mod tests {
     #[test]
     fn test_large_order_no_trade() {
         // 20 BTC at $50k with daily volume 1000 BTC = 2% of volume
-        let plan = plan_execution("BTCUSDT", Side::Sell, 20.0, 50_000.0, 1000.0, AssetClass::Crypto);
+        let plan = plan_execution(
+            "BTCUSDT",
+            Side::Sell,
+            20.0,
+            50_000.0,
+            1000.0,
+            AssetClass::Crypto,
+        );
         assert!(
             matches!(plan, ExecutionPlan::NoTrade { .. }),
             "Large order should be NoTrade"
@@ -199,7 +220,14 @@ mod tests {
 
     #[test]
     fn test_twap_correct_slice_count() {
-        let plan = plan_execution("BTCUSDT", Side::Buy, 5.0, 50_000.0, 1000.0, AssetClass::Crypto);
+        let plan = plan_execution(
+            "BTCUSDT",
+            Side::Buy,
+            5.0,
+            50_000.0,
+            1000.0,
+            AssetClass::Crypto,
+        );
         if let ExecutionPlan::Twap(twap) = plan {
             assert!(twap.slices.len() >= 3, "TWAP should have at least 3 slices");
             // All slices should be pending
