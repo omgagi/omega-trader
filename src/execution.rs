@@ -1,5 +1,6 @@
 //! Execution plan types — TWAP and Immediate order strategies.
 
+use crate::broker::AssetClass;
 use serde::{Deserialize, Serialize};
 
 /// Order side.
@@ -34,6 +35,7 @@ pub struct ImmediatePlan {
     pub quantity: f64,
     pub estimated_price: f64,
     pub estimated_usd: f64,
+    pub asset_class: AssetClass,
 }
 
 /// TWAP (time-weighted average price) plan.
@@ -46,6 +48,7 @@ pub struct TwapPlan {
     pub interval_secs: u64,
     pub estimated_price: f64,
     pub estimated_total_usd: f64,
+    pub asset_class: AssetClass,
 }
 
 /// A single slice in a TWAP plan.
@@ -77,6 +80,7 @@ pub fn plan_execution(
     quantity: f64,
     price: f64,
     daily_volume: f64,
+    asset_class: AssetClass,
 ) -> ExecutionPlan {
     let order_usd = quantity * price;
     let volume_usd = daily_volume * price;
@@ -97,6 +101,7 @@ pub fn plan_execution(
             quantity,
             estimated_price: price,
             estimated_usd: order_usd,
+            asset_class,
         })
     } else if pct_of_volume < 0.01 {
         // < 1% of daily volume → TWAP
@@ -119,6 +124,7 @@ pub fn plan_execution(
             interval_secs: 60,
             estimated_price: price,
             estimated_total_usd: order_usd,
+            asset_class,
         })
     } else {
         ExecutionPlan::NoTrade {
@@ -164,7 +170,7 @@ mod tests {
     #[test]
     fn test_small_order_immediate() {
         // 0.001 BTC at $50k with daily volume 1000 BTC = 0.0001% of volume
-        let plan = plan_execution("BTCUSDT", Side::Buy, 0.001, 50_000.0, 1000.0);
+        let plan = plan_execution("BTCUSDT", Side::Buy, 0.001, 50_000.0, 1000.0, AssetClass::Crypto);
         assert!(
             matches!(plan, ExecutionPlan::Immediate(_)),
             "Small order should be Immediate"
@@ -174,7 +180,7 @@ mod tests {
     #[test]
     fn test_medium_order_twap() {
         // 2 BTC at $50k with daily volume 1000 BTC = 0.2% of volume
-        let plan = plan_execution("BTCUSDT", Side::Buy, 2.0, 50_000.0, 1000.0);
+        let plan = plan_execution("BTCUSDT", Side::Buy, 2.0, 50_000.0, 1000.0, AssetClass::Crypto);
         assert!(
             matches!(plan, ExecutionPlan::Twap(_)),
             "Medium order should be TWAP"
@@ -184,7 +190,7 @@ mod tests {
     #[test]
     fn test_large_order_no_trade() {
         // 20 BTC at $50k with daily volume 1000 BTC = 2% of volume
-        let plan = plan_execution("BTCUSDT", Side::Sell, 20.0, 50_000.0, 1000.0);
+        let plan = plan_execution("BTCUSDT", Side::Sell, 20.0, 50_000.0, 1000.0, AssetClass::Crypto);
         assert!(
             matches!(plan, ExecutionPlan::NoTrade { .. }),
             "Large order should be NoTrade"
@@ -193,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_twap_correct_slice_count() {
-        let plan = plan_execution("BTCUSDT", Side::Buy, 5.0, 50_000.0, 1000.0);
+        let plan = plan_execution("BTCUSDT", Side::Buy, 5.0, 50_000.0, 1000.0, AssetClass::Crypto);
         if let ExecutionPlan::Twap(twap) = plan {
             assert!(twap.slices.len() >= 3, "TWAP should have at least 3 slices");
             // All slices should be pending
@@ -219,6 +225,7 @@ mod tests {
             quantity: 0.01,
             estimated_price: 50_000.0,
             estimated_usd: 500.0,
+            asset_class: AssetClass::Crypto,
         });
         let formatted = format_plan(&plan);
         assert!(formatted.contains("IMMEDIATE"));
@@ -228,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_no_volume_data() {
-        let plan = plan_execution("BTCUSDT", Side::Buy, 1.0, 50_000.0, 0.0);
+        let plan = plan_execution("BTCUSDT", Side::Buy, 1.0, 50_000.0, 0.0, AssetClass::Crypto);
         assert!(matches!(plan, ExecutionPlan::NoTrade { .. }));
     }
 

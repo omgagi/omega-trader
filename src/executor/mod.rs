@@ -9,7 +9,7 @@ mod tests;
 
 pub use guardrails::*;
 
-use crate::broker::{AssetClass, Broker};
+use crate::broker::Broker;
 use crate::execution::{ExecutionPlan, ImmediatePlan, TwapPlan};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -216,7 +216,7 @@ impl Executor {
     async fn execute_immediate(&mut self, plan: &ImmediatePlan, state: &mut ExecutionState) {
         match self
             .broker
-            .place_order(&plan.symbol, AssetClass::Stock, plan.side, plan.quantity)
+            .place_order(&plan.symbol, plan.asset_class, plan.side, plan.quantity)
             .await
         {
             Ok(fill) => {
@@ -246,7 +246,7 @@ impl Executor {
 
         for (i, slice) in plan.slices.iter().enumerate() {
             // Circuit breaker: check price deviation.
-            match self.broker.get_price(&plan.symbol, AssetClass::Stock).await {
+            match self.broker.get_price(&plan.symbol, plan.asset_class).await {
                 Ok(current_price) => {
                     if entry_price > 0.0 {
                         let deviation = (current_price - entry_price).abs() / entry_price;
@@ -270,7 +270,7 @@ impl Executor {
             // Execute slice.
             match self
                 .broker
-                .place_order(&plan.symbol, AssetClass::Stock, plan.side, slice.quantity)
+                .place_order(&plan.symbol, plan.asset_class, plan.side, slice.quantity)
                 .await
             {
                 Ok(fill) => {

@@ -226,6 +226,7 @@ pub async fn handle_order(
             quantity,
             estimated_price: 0.0,
             estimated_usd: 0.0,
+            asset_class: parsed_class,
         });
 
         let circuit_breaker = CircuitBreaker::default();

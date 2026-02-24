@@ -275,20 +275,43 @@ impl IbkrBroker {
             .await
             .map_err(|e| anyhow::anyhow!("Bracket stop-loss order failed: {e}"))?;
 
-        // Read parent order fill.
-        while let Some(result) = parent_notifications.next().await {
-            match result {
-                Ok(PlaceOrder::ExecutionData(exec)) => {
-                    state.total_filled_qty = exec.execution.cumulative_quantity;
-                    let avg_price = exec.execution.average_price;
-                    state.total_filled_usd = state.total_filled_qty * avg_price;
+        // Read parent order fill (30s timeout to avoid hanging on closed markets).
+        let fill_timeout = std::time::Duration::from_secs(30);
+        let fill_result = tokio::time::timeout(fill_timeout, async {
+            while let Some(result) = parent_notifications.next().await {
+                match result {
+                    Ok(PlaceOrder::ExecutionData(exec)) => {
+                        state.total_filled_qty = exec.execution.cumulative_quantity;
+                        let avg_price = exec.execution.average_price;
+                        state.total_filled_usd = state.total_filled_qty * avg_price;
+                    }
+                    Ok(PlaceOrder::OrderStatus(os)) => {
+                        // Capture fill from OrderStatus (paper accounts often report here).
+                        if os.filled > 0.0 && os.filled > state.total_filled_qty {
+                            state.total_filled_qty = os.filled;
+                            state.total_filled_usd = os.filled * os.average_fill_price;
+                        }
+                        if os.status == "Filled" || os.status == "Inactive" {
+                            break;
+                        }
+                    }
+                    Ok(PlaceOrder::CommissionReport(_)) => break,
+                    Ok(_) => {}
+                    Err(e) => {
+                        state.errors.push(e.to_string());
+                        break;
+                    }
                 }
-                Ok(PlaceOrder::CommissionReport(_)) => break,
-                Ok(_) => {}
-                Err(e) => {
-                    state.errors.push(e.to_string());
-                    break;
-                }
+            }
+        })
+        .await;
+
+        if fill_result.is_err() {
+            warn!("quant: bracket order fill timed out after 30s — order may still be pending");
+            if state.total_filled_qty == 0.0 {
+                state.status = ExecutionStatus::Pending;
+                state.updated_at = chrono::Utc::now();
+                return Ok(state);
             }
         }
 
@@ -352,20 +375,38 @@ impl IbkrBroker {
             updated_at: chrono::Utc::now(),
         };
 
-        while let Some(result) = notifications.next().await {
-            match result {
-                Ok(PlaceOrder::ExecutionData(exec)) => {
-                    state.total_filled_qty = exec.execution.cumulative_quantity;
-                    let avg_price = exec.execution.average_price;
-                    state.total_filled_usd = state.total_filled_qty * avg_price;
-                }
-                Ok(PlaceOrder::CommissionReport(_)) => break,
-                Ok(_) => {}
-                Err(e) => {
-                    state.errors.push(e.to_string());
-                    break;
+        // 30s timeout to avoid hanging on closed markets.
+        let fill_timeout = std::time::Duration::from_secs(30);
+        let fill_result = tokio::time::timeout(fill_timeout, async {
+            while let Some(result) = notifications.next().await {
+                match result {
+                    Ok(PlaceOrder::ExecutionData(exec)) => {
+                        state.total_filled_qty = exec.execution.cumulative_quantity;
+                        let avg_price = exec.execution.average_price;
+                        state.total_filled_usd = state.total_filled_qty * avg_price;
+                    }
+                    Ok(PlaceOrder::OrderStatus(os)) => {
+                        if os.filled > 0.0 && os.filled > state.total_filled_qty {
+                            state.total_filled_qty = os.filled;
+                            state.total_filled_usd = os.filled * os.average_fill_price;
+                        }
+                        if os.status == "Filled" || os.status == "Inactive" {
+                            break;
+                        }
+                    }
+                    Ok(PlaceOrder::CommissionReport(_)) => break,
+                    Ok(_) => {}
+                    Err(e) => {
+                        state.errors.push(e.to_string());
+                        break;
+                    }
                 }
             }
+        })
+        .await;
+
+        if fill_result.is_err() {
+            warn!("quant: close order fill timed out after 30s — order may still be pending");
         }
 
         state.slices_completed = 1;
@@ -558,7 +599,7 @@ impl Broker for IbkrBroker {
 
         let contract = Self::build_contract(symbol, asset_class)?;
 
-        let client = Client::connect(&self.config.connection_url(), self.config.client_id + 100)
+        let client = Client::connect(&self.config.connection_url(), self.config.client_id + 150)
             .await
             .map_err(|e| anyhow::anyhow!("IBKR connection failed: {e}"))?;
 
@@ -581,19 +622,38 @@ impl Broker for IbkrBroker {
         let mut filled_qty = 0.0;
         let mut avg_price = 0.0;
 
-        while let Some(result) = notifications.next().await {
-            match result {
-                Ok(PlaceOrder::ExecutionData(exec)) => {
-                    filled_qty = exec.execution.cumulative_quantity;
-                    avg_price = exec.execution.average_price;
-                }
-                Ok(PlaceOrder::CommissionReport(_)) => break,
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("quant: order notification error: {e}");
-                    break;
+        // 30s timeout to avoid hanging on closed markets.
+        let fill_timeout = std::time::Duration::from_secs(30);
+        let fill_result = tokio::time::timeout(fill_timeout, async {
+            while let Some(result) = notifications.next().await {
+                match result {
+                    Ok(PlaceOrder::ExecutionData(exec)) => {
+                        filled_qty = exec.execution.cumulative_quantity;
+                        avg_price = exec.execution.average_price;
+                    }
+                    Ok(PlaceOrder::OrderStatus(os)) => {
+                        // Capture fill from OrderStatus (paper accounts often report here).
+                        if os.filled > 0.0 && os.filled > filled_qty {
+                            filled_qty = os.filled;
+                            avg_price = os.average_fill_price;
+                        }
+                        if os.status == "Filled" || os.status == "Inactive" {
+                            break;
+                        }
+                    }
+                    Ok(PlaceOrder::CommissionReport(_)) => break,
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("quant: order notification error: {e}");
+                        break;
+                    }
                 }
             }
+        })
+        .await;
+
+        if fill_result.is_err() {
+            warn!("quant: order fill timed out after 30s — order may still be pending");
         }
 
         let filled_usd = filled_qty * avg_price;

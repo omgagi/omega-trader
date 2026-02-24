@@ -1,4 +1,5 @@
 use super::*;
+use crate::broker::AssetClass;
 use crate::execution::{ExecutionPlan, ImmediatePlan, Side};
 use chrono::Utc;
 
@@ -17,6 +18,7 @@ fn test_state_persistence_roundtrip() {
         quantity: 10.0,
         estimated_price: 150.0,
         estimated_usd: 1500.0,
+        asset_class: AssetClass::Stock,
     });
     let state = ExecutionState::new(&plan);
     let json = persist_state(&state).unwrap();
